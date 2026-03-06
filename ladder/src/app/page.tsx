@@ -9,7 +9,7 @@ export default function Home() {
             <Shuffle size={32} />
           </div>
           <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-zinc-900 dark:text-zinc-100 text-center">
-            팀 랜덤 선택기
+            팀 랜덤
           </h1>
           <p className="text-zinc-500 dark:text-zinc-400 text-center text-sm sm:text-base">
             회식 메뉴, 발표 순서 등을 빠르고 공정하게 정해보세요!

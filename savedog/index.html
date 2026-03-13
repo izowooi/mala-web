@@ -1,0 +1,886 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>Save Dog</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg-top: #f8f1be;
+      --bg-bottom: #dfb469;
+      --panel: rgba(255, 250, 231, 0.86);
+      --panel-stroke: rgba(90, 64, 21, 0.18);
+      --ink: #2c1d0d;
+      --accent: #c76b2c;
+      --danger: #a23222;
+      --success: #1f7a45;
+    }
+
+    * {
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    html,
+    body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at top, rgba(255, 255, 255, 0.52), transparent 38%),
+        linear-gradient(180deg, var(--bg-top), var(--bg-bottom));
+      color: var(--ink);
+      font-family: "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+      touch-action: none;
+      overscroll-behavior: none;
+    }
+
+    body {
+      display: grid;
+      place-items: center;
+    }
+
+    #app {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    #game-root {
+      width: 100%;
+      height: 100%;
+    }
+
+    #loading,
+    #error {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      text-align: center;
+      background:
+        linear-gradient(180deg, rgba(255, 248, 224, 0.96), rgba(238, 204, 137, 0.96));
+      z-index: 20;
+    }
+
+    #error {
+      display: none;
+      color: var(--danger);
+    }
+
+    .panel {
+      max-width: min(92vw, 540px);
+      padding: 22px 24px;
+      border-radius: 24px;
+      background: var(--panel);
+      border: 1px solid var(--panel-stroke);
+      box-shadow:
+        0 18px 48px rgba(75, 48, 11, 0.16),
+        inset 0 1px 0 rgba(255, 255, 255, 0.72);
+      backdrop-filter: blur(8px);
+    }
+
+    .title {
+      margin: 0 0 10px;
+      font-size: clamp(28px, 5vw, 40px);
+      font-weight: 800;
+      letter-spacing: -0.04em;
+    }
+
+    .copy {
+      margin: 0;
+      font-size: clamp(15px, 2.8vw, 18px);
+      line-height: 1.55;
+    }
+
+    .hint {
+      margin-top: 14px;
+      color: rgba(44, 29, 13, 0.78);
+      font-size: clamp(13px, 2.4vw, 15px);
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="game-root"></div>
+    <div id="loading">
+      <div class="panel">
+        <h1 class="title">Save Dog</h1>
+        <p class="copy">선을 그려 벌을 막고 10초 동안 강아지를 지키세요.</p>
+        <p class="hint">모바일은 스와이프, PC는 드래그로 플레이할 수 있습니다.</p>
+      </div>
+    </div>
+    <div id="error">
+      <div class="panel">
+        <h1 class="title">실행 오류</h1>
+        <p class="copy" id="error-copy"></p>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.70.0/dist/phaser.min.js"></script>
+  <script>
+    (() => {
+      const loadingEl = document.getElementById("loading");
+      const errorEl = document.getElementById("error");
+      const errorCopyEl = document.getElementById("error-copy");
+
+      const WORLD_WIDTH = 900;
+      const WORLD_HEIGHT = 1200;
+      const DRAW_THICKNESS = 28;
+      const DRAW_MIN_DISTANCE = 12;
+      const COUNTDOWN_SECONDS = 10;
+      const BEE_COUNT = 18;
+      const BEE_SPAWN_DELAY = 120;
+      const GRID_SIZE = 42;
+      const GRID_COLS = Math.ceil(WORLD_WIDTH / GRID_SIZE);
+      const GRID_ROWS = Math.ceil(WORLD_HEIGHT / GRID_SIZE);
+      const MATTER = Phaser.Physics.Matter.Matter;
+      const ASSET_PATHS = {
+        background: "assets/background.png",
+        hive: "assets/hive.png",
+        dogIdle: "assets/dog_idle.png",
+        dogHurt: "assets/dog_hurt.png",
+        bee: "assets/bee.png"
+      };
+
+      const safeTextStyle = {
+        fontFamily: "Segoe UI, Apple SD Gothic Neo, Malgun Gothic, sans-serif",
+        color: "#2c1d0d"
+      };
+
+      function showError(message) {
+        loadingEl.style.display = "none";
+        errorCopyEl.textContent = message;
+        errorEl.style.display = "grid";
+      }
+
+      function loadImageMap(paths) {
+        const entries = Object.entries(paths);
+        return Promise.all(entries.map(([key, src]) => new Promise((resolve, reject) => {
+          const image = new Image();
+          image.onload = () => resolve([key, image]);
+          image.onerror = () => reject(new Error(src + " 파일을 불러오지 못했습니다."));
+          image.src = src;
+        }))).then((pairs) => Object.fromEntries(pairs));
+      }
+
+      function clamp(value, min, max) {
+        return Math.min(max, Math.max(min, value));
+      }
+
+      function distance(a, b) {
+        return Phaser.Math.Distance.Between(a.x, a.y, b.x, b.y);
+      }
+
+      function lerpPoint(a, b, t) {
+        return {
+          x: Phaser.Math.Linear(a.x, b.x, t),
+          y: Phaser.Math.Linear(a.y, b.y, t)
+        };
+      }
+
+      class GameScene extends Phaser.Scene {
+        constructor() {
+          super("game");
+          this.rawStroke = [];
+          this.isDrawing = false;
+          this.barrier = null;
+          this.bees = [];
+          this.beeSpawnEvent = null;
+          this.flowField = null;
+          this.flowFieldTimer = 0;
+          this.hasPlacedBarrier = false;
+          this.attackStarted = false;
+          this.gameOver = false;
+          this.countdownMs = COUNTDOWN_SECONDS * 1000;
+        }
+
+        create() {
+          for (const [key, image] of Object.entries(window.__SAVE_DOG_IMAGES__)) {
+            if (!this.textures.exists(key)) {
+              this.textures.addImage(key, image);
+            }
+          }
+
+          this.cameras.main.setBackgroundColor("#f8f1be");
+          this.matter.world.setBounds(0, 0, WORLD_WIDTH, WORLD_HEIGHT, 80, true, true, true, true);
+          this.matter.world.engine.world.gravity.y = 1.1;
+
+          this.createBackground();
+          this.createStaticActors();
+          this.createUi();
+          this.createInput();
+
+          this.matter.world.on("collisionstart", (event) => this.handleCollisionStart(event));
+
+          loadingEl.style.display = "none";
+        }
+
+        createBackground() {
+          const bg = this.add.image(WORLD_WIDTH / 2, WORLD_HEIGHT / 2, "background");
+          bg.setDepth(-10);
+          bg.setDisplaySize(WORLD_WIDTH, WORLD_HEIGHT);
+
+          const vignette = this.add.graphics().setDepth(-9);
+          vignette.fillGradientStyle(0xffffff, 0xffffff, 0x000000, 0x000000, 0.16, 0.16, 0.08, 0.08);
+          vignette.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+        }
+
+        createStaticActors() {
+          const dogX = WORLD_WIDTH * 0.5;
+          const dogY = WORLD_HEIGHT * 0.84;
+          const hiveX = WORLD_WIDTH * 0.5;
+          const hiveY = WORLD_HEIGHT * 0.15;
+
+          this.hive = this.matter.add.image(hiveX, hiveY, "hive", null, {
+            isStatic: true,
+            label: "hive"
+          });
+          this.hive.setScale(0.18);
+          this.hive.setDepth(3);
+          this.hive.setCircle(this.hive.width * this.hive.scaleX * 0.34);
+
+          this.dog = this.matter.add.image(dogX, dogY, "dogIdle", null, {
+            isStatic: true,
+            label: "dog"
+          });
+          this.dog.setScale(0.22);
+          this.dog.setDepth(4);
+          this.dog.setCircle(this.dog.width * this.dog.scaleX * 0.28);
+
+          this.matter.add.rectangle(WORLD_WIDTH / 2, WORLD_HEIGHT - 18, WORLD_WIDTH, 36, {
+            isStatic: true,
+            label: "floor"
+          });
+        }
+
+        createUi() {
+          this.topShade = this.add.graphics().setDepth(11);
+          this.topShade.fillStyle(0xfff6dc, 0.68);
+          this.topShade.fillRoundedRect(24, 18, WORLD_WIDTH - 48, 92, 30);
+          this.topShade.lineStyle(2, 0x715020, 0.14);
+          this.topShade.strokeRoundedRect(24, 18, WORLD_WIDTH - 48, 92, 30);
+
+          this.timerText = this.add.text(WORLD_WIDTH / 2, 52, "준비", {
+            ...safeTextStyle,
+            fontSize: "42px",
+            fontStyle: "800"
+          }).setOrigin(0.5).setDepth(12);
+
+          this.statusText = this.add.text(WORLD_WIDTH / 2, 98, "드래그해서 벽을 그리세요", {
+            ...safeTextStyle,
+            fontSize: "20px",
+            color: "#5d4120"
+          }).setOrigin(0.5).setDepth(12);
+
+          this.resetButton = this.add.text(WORLD_WIDTH - 88, WORLD_HEIGHT - 56, "다시 시작", {
+            ...safeTextStyle,
+            fontSize: "24px",
+            backgroundColor: "rgba(255, 248, 232, 0.84)",
+            padding: { x: 18, y: 10 }
+          }).setOrigin(0.5).setDepth(12).setInteractive({ useHandCursor: true });
+          this.resetButton.on("pointerdown", () => this.scene.restart());
+
+          this.helpCard = this.add.graphics().setDepth(10);
+          this.helpCard.fillStyle(0xfff7e6, 0.86);
+          this.helpCard.fillRoundedRect(32, WORLD_HEIGHT - 172, WORLD_WIDTH - 64, 112, 28);
+          this.helpCard.lineStyle(2, 0x6f4c1c, 0.14);
+          this.helpCard.strokeRoundedRect(32, WORLD_HEIGHT - 172, WORLD_WIDTH - 64, 112, 28);
+
+          this.helpText = this.add.text(WORLD_WIDTH / 2, WORLD_HEIGHT - 116,
+            "선을 하나 그리고 손을 떼면 벌이 쏟아집니다.\n벽이 떨어지면서도 강아지를 10초 지키면 승리합니다.",
+            {
+              ...safeTextStyle,
+              fontSize: "22px",
+              align: "center",
+              color: "#5b4021",
+              lineSpacing: 6
+            }
+          ).setOrigin(0.5).setDepth(11);
+
+          this.overlay = this.add.container(0, 0).setDepth(20).setVisible(false);
+          const overlayBg = this.add.rectangle(WORLD_WIDTH / 2, WORLD_HEIGHT / 2, WORLD_WIDTH, WORLD_HEIGHT, 0x24170b, 0.54);
+          const panel = this.add.rectangle(WORLD_WIDTH / 2, WORLD_HEIGHT / 2, WORLD_WIDTH - 120, 250, 0xfff7e8, 0.94);
+          panel.setStrokeStyle(2, 0x70491d, 0.2);
+          this.overlayTitle = this.add.text(WORLD_WIDTH / 2, WORLD_HEIGHT / 2 - 36, "", {
+            ...safeTextStyle,
+            fontSize: "54px",
+            fontStyle: "800"
+          }).setOrigin(0.5);
+          this.overlayCopy = this.add.text(WORLD_WIDTH / 2, WORLD_HEIGHT / 2 + 26, "", {
+            ...safeTextStyle,
+            fontSize: "24px",
+            align: "center",
+            color: "#5b4021"
+          }).setOrigin(0.5);
+          const replay = this.add.text(WORLD_WIDTH / 2, WORLD_HEIGHT / 2 + 94, "탭해서 다시 시작", {
+            ...safeTextStyle,
+            fontSize: "24px",
+            color: "#c76b2c"
+          }).setOrigin(0.5).setInteractive({ useHandCursor: true });
+          replay.on("pointerdown", () => this.scene.restart());
+          this.overlay.add([overlayBg, panel, this.overlayTitle, this.overlayCopy, replay]);
+
+          this.previewGraphics = this.add.graphics().setDepth(8);
+          this.barrierGraphics = this.add.graphics().setDepth(7);
+        }
+
+        createInput() {
+          this.input.on("pointerdown", (pointer) => {
+            if (this.hasPlacedBarrier || this.gameOver) {
+              return;
+            }
+
+            this.isDrawing = true;
+            this.rawStroke = [this.clampPoint(pointer)];
+            this.redrawPreview();
+          });
+
+          this.input.on("pointermove", (pointer) => {
+            if (!this.isDrawing || this.hasPlacedBarrier || this.gameOver) {
+              return;
+            }
+
+            const point = this.clampPoint(pointer);
+            const lastPoint = this.rawStroke[this.rawStroke.length - 1];
+
+            if (!lastPoint || distance(point, lastPoint) >= DRAW_MIN_DISTANCE) {
+              this.rawStroke.push(point);
+              this.redrawPreview();
+            }
+          });
+
+          const finalize = (pointer) => {
+            if (!this.isDrawing || this.hasPlacedBarrier || this.gameOver) {
+              this.isDrawing = false;
+              return;
+            }
+
+            this.isDrawing = false;
+
+            if (pointer) {
+              const point = this.clampPoint(pointer);
+              const lastPoint = this.rawStroke[this.rawStroke.length - 1];
+              if (!lastPoint || distance(point, lastPoint) >= DRAW_MIN_DISTANCE * 0.75) {
+                this.rawStroke.push(point);
+              }
+            }
+
+            if (this.rawStroke.length < 2) {
+              this.rawStroke = [];
+              this.redrawPreview();
+              return;
+            }
+
+            const smoothed = this.buildStrokePath(this.rawStroke);
+            const usableLength = this.measurePathLength(smoothed);
+            if (smoothed.length < 2 || usableLength < 140) {
+              this.statusText.setText("선을 조금 더 길게 그려주세요");
+              this.rawStroke = [];
+              this.redrawPreview();
+              return;
+            }
+
+            this.placeBarrier(smoothed);
+            this.startAttackPhase();
+          };
+
+          this.input.on("pointerup", finalize);
+          this.input.on("pointerupoutside", finalize);
+        }
+
+        clampPoint(pointer) {
+          return {
+            x: clamp(pointer.worldX, 20, WORLD_WIDTH - 20),
+            y: clamp(pointer.worldY, 120, WORLD_HEIGHT - 26)
+          };
+        }
+
+        buildStrokePath(points) {
+          if (points.length <= 2) {
+            return points.slice();
+          }
+
+          const vectors = points.map((point) => new Phaser.Math.Vector2(point.x, point.y));
+          const curve = new Phaser.Curves.Spline(vectors);
+          const samples = clamp(points.length * 5, 24, 120);
+          const result = [];
+
+          for (const vector of curve.getPoints(samples)) {
+            const point = { x: vector.x, y: vector.y };
+            const prev = result[result.length - 1];
+            if (!prev || distance(prev, point) >= 6) {
+              result.push(point);
+            }
+          }
+
+          if (result.length < 2) {
+            return points.slice();
+          }
+
+          return result;
+        }
+
+        measurePathLength(points) {
+          let total = 0;
+          for (let i = 1; i < points.length; i += 1) {
+            total += distance(points[i - 1], points[i]);
+          }
+          return total;
+        }
+
+        redrawPreview() {
+          this.previewGraphics.clear();
+          if (!this.rawStroke.length) {
+            return;
+          }
+
+          const points = this.buildStrokePath(this.rawStroke);
+          this.drawStroke(this.previewGraphics, points, DRAW_THICKNESS, 0x171717, 0.96);
+        }
+
+        placeBarrier(points) {
+          this.previewGraphics.clear();
+          this.helpCard.setVisible(false);
+          this.helpText.setVisible(false);
+          this.hasPlacedBarrier = true;
+          this.statusText.setText("벌들이 길을 찾는 중");
+
+          const parts = [];
+          const lineRadius = DRAW_THICKNESS * 0.54;
+
+          for (let i = 0; i < points.length; i += 1) {
+            parts.push(MATTER.Bodies.circle(points[i].x, points[i].y, lineRadius, {
+              friction: 0.8,
+              restitution: 0.05
+            }));
+          }
+
+          for (let i = 1; i < points.length; i += 1) {
+            const a = points[i - 1];
+            const b = points[i];
+            const length = distance(a, b);
+            if (length < 2) {
+              continue;
+            }
+
+            parts.push(MATTER.Bodies.rectangle(
+              (a.x + b.x) * 0.5,
+              (a.y + b.y) * 0.5,
+              length + DRAW_THICKNESS,
+              DRAW_THICKNESS,
+              {
+                angle: Phaser.Math.Angle.Between(a.x, a.y, b.x, b.y),
+                friction: 0.8,
+                restitution: 0.05
+              }
+            ));
+          }
+
+          const body = MATTER.Body.create({
+            label: "barrier",
+            parts,
+            friction: 0.8,
+            frictionAir: 0.02,
+            restitution: 0.05,
+            density: 0.0026
+          });
+
+          this.matter.world.add(body);
+          MATTER.Body.setMass(body, 18);
+
+          this.barrier = {
+            body,
+            thickness: DRAW_THICKNESS,
+            localPoints: points.map((point) => ({
+              x: point.x - body.position.x,
+              y: point.y - body.position.y
+            }))
+          };
+
+          this.drawBarrier();
+        }
+
+        drawStroke(graphics, points, thickness, color, alpha) {
+          if (!points.length) {
+            return;
+          }
+
+          graphics.clear();
+          graphics.lineStyle(thickness, color, alpha);
+          graphics.beginPath();
+          graphics.moveTo(points[0].x, points[0].y);
+
+          for (let i = 1; i < points.length; i += 1) {
+            graphics.lineTo(points[i].x, points[i].y);
+          }
+
+          graphics.strokePath();
+          graphics.fillStyle(color, alpha);
+
+          for (const point of points) {
+            graphics.fillCircle(point.x, point.y, thickness * 0.48);
+          }
+        }
+
+        drawBarrier() {
+          if (!this.barrier) {
+            this.barrierGraphics.clear();
+            return;
+          }
+
+          const cos = Math.cos(this.barrier.body.angle);
+          const sin = Math.sin(this.barrier.body.angle);
+          const worldPoints = this.barrier.localPoints.map((point) => ({
+            x: this.barrier.body.position.x + point.x * cos - point.y * sin,
+            y: this.barrier.body.position.y + point.x * sin + point.y * cos
+          }));
+
+          this.drawStroke(this.barrierGraphics, worldPoints, this.barrier.thickness, 0x111111, 0.98);
+        }
+
+        startAttackPhase() {
+          this.attackStarted = true;
+          this.countdownMs = COUNTDOWN_SECONDS * 1000;
+          this.timerText.setText(COUNTDOWN_SECONDS.toFixed(1));
+          this.statusText.setText("강아지를 10초 동안 지키세요");
+
+          const hiveOffsetY = this.hive.displayHeight * 0.18;
+          this.beeSpawnEvent = this.time.addEvent({
+            delay: BEE_SPAWN_DELAY,
+            repeat: BEE_COUNT - 1,
+            callback: () => {
+              const spread = Phaser.Math.Between(-64, 64);
+              const spawn = {
+                x: this.hive.x + spread * 0.55,
+                y: this.hive.y + hiveOffsetY + Phaser.Math.Between(-12, 18)
+              };
+              this.spawnBee(spawn.x, spawn.y);
+            }
+          });
+
+          this.rebuildFlowField();
+        }
+
+        spawnBee(x, y) {
+          const bee = this.matter.add.image(x, y, "bee");
+          bee.setScale(0.076);
+          bee.setCircle((bee.width * bee.scaleX) * 0.24);
+          bee.setDepth(6);
+          bee.setBounce(0.6);
+          bee.setFriction(0.02, 0.01, 0);
+          bee.setFrictionAir(0.035);
+          bee.setMass(1.5);
+          bee.body.label = "bee";
+          bee.body.plugin = bee.body.plugin || {};
+          bee.body.plugin.agent = {
+            target: { x: this.dog.x, y: this.dog.y },
+            repathAt: 0
+          };
+          bee.body.ignoreGravity = true;
+          this.bees.push(bee);
+        }
+
+        handleCollisionStart(event) {
+          if (this.gameOver) {
+            return;
+          }
+
+          for (const pair of event.pairs) {
+            const { bodyA, bodyB } = pair;
+            const labels = [bodyA.label, bodyB.label];
+            if (labels.includes("bee") && labels.includes("dog")) {
+              this.failGame();
+              return;
+            }
+          }
+        }
+
+        rebuildFlowField() {
+          const blocked = Array.from({ length: GRID_ROWS }, () => Array(GRID_COLS).fill(false));
+          const distances = Array.from({ length: GRID_ROWS }, () => Array(GRID_COLS).fill(Number.POSITIVE_INFINITY));
+          const parents = Array.from({ length: GRID_ROWS }, () => Array(GRID_COLS).fill(null));
+
+          this.markCircleOnGrid(blocked, this.hive.x, this.hive.y + 18, this.hive.displayWidth * 0.22);
+          if (this.barrier) {
+            this.markBarrierOnGrid(blocked);
+          }
+
+          const goalCell = this.toCell(this.dog.x, this.dog.y);
+          blocked[goalCell.row][goalCell.col] = false;
+
+          const queue = [goalCell];
+          distances[goalCell.row][goalCell.col] = 0;
+
+          const directions = [
+            { col: 1, row: 0 },
+            { col: -1, row: 0 },
+            { col: 0, row: 1 },
+            { col: 0, row: -1 },
+            { col: 1, row: 1 },
+            { col: 1, row: -1 },
+            { col: -1, row: 1 },
+            { col: -1, row: -1 }
+          ];
+
+          while (queue.length) {
+            const current = queue.shift();
+            const baseDistance = distances[current.row][current.col];
+
+            for (const direction of directions) {
+              const nextCol = current.col + direction.col;
+              const nextRow = current.row + direction.row;
+              if (!this.isInsideGrid(nextCol, nextRow) || blocked[nextRow][nextCol]) {
+                continue;
+              }
+
+              const stepCost = direction.col !== 0 && direction.row !== 0 ? 1.4 : 1;
+              const nextDistance = baseDistance + stepCost;
+
+              if (nextDistance < distances[nextRow][nextCol]) {
+                distances[nextRow][nextCol] = nextDistance;
+                parents[nextRow][nextCol] = current;
+                queue.push({ col: nextCol, row: nextRow });
+              }
+            }
+          }
+
+          this.flowField = { blocked, distances, parents };
+          this.flowFieldTimer = 260;
+        }
+
+        markCircleOnGrid(blocked, x, y, radius) {
+          const minCol = clamp(Math.floor((x - radius) / GRID_SIZE), 0, GRID_COLS - 1);
+          const maxCol = clamp(Math.floor((x + radius) / GRID_SIZE), 0, GRID_COLS - 1);
+          const minRow = clamp(Math.floor((y - radius) / GRID_SIZE), 0, GRID_ROWS - 1);
+          const maxRow = clamp(Math.floor((y + radius) / GRID_SIZE), 0, GRID_ROWS - 1);
+
+          for (let row = minRow; row <= maxRow; row += 1) {
+            for (let col = minCol; col <= maxCol; col += 1) {
+              const center = this.cellCenter(col, row);
+              if (Phaser.Math.Distance.Between(center.x, center.y, x, y) <= radius) {
+                blocked[row][col] = true;
+              }
+            }
+          }
+        }
+
+        markBarrierOnGrid(blocked) {
+          const points = this.getBarrierWorldPoints();
+          const radius = this.barrier.thickness * 0.64;
+
+          for (let i = 1; i < points.length; i += 1) {
+            const a = points[i - 1];
+            const b = points[i];
+            const segmentLength = distance(a, b);
+            const steps = Math.max(2, Math.ceil(segmentLength / (GRID_SIZE * 0.4)));
+            for (let s = 0; s <= steps; s += 1) {
+              const sample = lerpPoint(a, b, s / steps);
+              this.markCircleOnGrid(blocked, sample.x, sample.y, radius);
+            }
+          }
+        }
+
+        getBarrierWorldPoints() {
+          if (!this.barrier) {
+            return [];
+          }
+
+          const cos = Math.cos(this.barrier.body.angle);
+          const sin = Math.sin(this.barrier.body.angle);
+          return this.barrier.localPoints.map((point) => ({
+            x: this.barrier.body.position.x + point.x * cos - point.y * sin,
+            y: this.barrier.body.position.y + point.x * sin + point.y * cos
+          }));
+        }
+
+        toCell(x, y) {
+          return {
+            col: clamp(Math.floor(x / GRID_SIZE), 0, GRID_COLS - 1),
+            row: clamp(Math.floor(y / GRID_SIZE), 0, GRID_ROWS - 1)
+          };
+        }
+
+        cellCenter(col, row) {
+          return {
+            x: col * GRID_SIZE + GRID_SIZE * 0.5,
+            y: row * GRID_SIZE + GRID_SIZE * 0.5
+          };
+        }
+
+        isInsideGrid(col, row) {
+          return col >= 0 && col < GRID_COLS && row >= 0 && row < GRID_ROWS;
+        }
+
+        resolveBeeTarget(bee) {
+          if (!this.flowField) {
+            return { x: this.dog.x, y: this.dog.y, forceBoost: 1.1 };
+          }
+
+          const cell = this.toCell(bee.x, bee.y);
+          const currentDistance = this.flowField.distances[cell.row][cell.col];
+
+          if (!Number.isFinite(currentDistance)) {
+            return { x: this.dog.x, y: this.dog.y, forceBoost: 1.35 };
+          }
+
+          let bestCell = cell;
+          let bestDistance = currentDistance;
+
+          for (let row = cell.row - 1; row <= cell.row + 1; row += 1) {
+            for (let col = cell.col - 1; col <= cell.col + 1; col += 1) {
+              if (!this.isInsideGrid(col, row)) {
+                continue;
+              }
+              const nextDistance = this.flowField.distances[row][col];
+              if (nextDistance < bestDistance) {
+                bestDistance = nextDistance;
+                bestCell = { col, row };
+              }
+            }
+          }
+
+          if (bestCell.col === cell.col && bestCell.row === cell.row) {
+            return { x: this.dog.x, y: this.dog.y, forceBoost: 1.2 };
+          }
+
+          const target = this.cellCenter(bestCell.col, bestCell.row);
+          return { x: target.x, y: target.y, forceBoost: 1.0 };
+        }
+
+        update(_time, delta) {
+          if (this.barrier) {
+            this.drawBarrier();
+          }
+
+          if (!this.attackStarted || this.gameOver) {
+            return;
+          }
+
+          this.countdownMs = Math.max(0, this.countdownMs - delta);
+          this.timerText.setText((this.countdownMs / 1000).toFixed(1));
+
+          this.flowFieldTimer -= delta;
+          if (this.flowFieldTimer <= 0) {
+            this.rebuildFlowField();
+          }
+
+          this.updateBees();
+
+          if (this.countdownMs <= 0) {
+            this.winGame();
+          }
+        }
+
+        updateBees() {
+          for (const bee of this.bees) {
+            const targetInfo = this.resolveBeeTarget(bee);
+            const dx = targetInfo.x - bee.x;
+            const dy = targetInfo.y - bee.y;
+            const length = Math.hypot(dx, dy) || 1;
+            const forceScale = 0.00056 * targetInfo.forceBoost * bee.body.mass;
+
+            MATTER.Body.applyForce(bee.body, bee.body.position, {
+              x: (dx / length) * forceScale,
+              y: (dy / length) * forceScale
+            });
+
+            const velocity = bee.body.velocity;
+            const speed = Math.hypot(velocity.x, velocity.y);
+            if (speed > 7.5) {
+              MATTER.Body.setVelocity(bee.body, {
+                x: velocity.x / speed * 7.5,
+                y: velocity.y / speed * 7.5
+              });
+            }
+
+            if (speed > 0.2) {
+              bee.setRotation(Math.atan2(velocity.y, velocity.x));
+            }
+          }
+        }
+
+        failGame() {
+          if (this.gameOver) {
+            return;
+          }
+
+          this.gameOver = true;
+          this.attackStarted = false;
+          this.timerText.setText("실패");
+          this.statusText.setText("벌이 강아지에게 닿았습니다");
+          this.dog.setTexture("dogHurt");
+          this.showOverlay("실패", "벽이 무너졌습니다.\n다시 그려서 강아지를 지켜보세요.", "#a23222");
+        }
+
+        winGame() {
+          if (this.gameOver) {
+            return;
+          }
+
+          this.gameOver = true;
+          this.attackStarted = false;
+          this.timerText.setText("성공");
+          this.statusText.setText("강아지를 지켜냈습니다");
+          this.showOverlay("성공", "10초를 버텼습니다.\n새로운 방어선을 다시 만들어볼 수 있습니다.", "#1f7a45");
+        }
+
+        showOverlay(title, copy, color) {
+          if (this.beeSpawnEvent) {
+            this.beeSpawnEvent.remove(false);
+            this.beeSpawnEvent = null;
+          }
+
+          this.overlayTitle.setText(title);
+          this.overlayTitle.setColor(color);
+          this.overlayCopy.setText(copy);
+          this.overlay.setVisible(true);
+        }
+      }
+
+      function bootGame(images) {
+        window.__SAVE_DOG_IMAGES__ = images;
+
+        new Phaser.Game({
+          type: Phaser.AUTO,
+          parent: "game-root",
+          width: WORLD_WIDTH,
+          height: WORLD_HEIGHT,
+          transparent: true,
+          backgroundColor: "#f8f1be",
+          scale: {
+            mode: Phaser.Scale.FIT,
+            autoCenter: Phaser.Scale.CENTER_BOTH,
+            width: WORLD_WIDTH,
+            height: WORLD_HEIGHT
+          },
+          physics: {
+            default: "matter",
+            matter: {
+              gravity: { y: 1.1 },
+              enableSleeping: false
+            }
+          },
+          scene: [GameScene]
+        });
+      }
+
+      if (!window.Phaser) {
+        showError("Phaser 라이브러리를 불러오지 못했습니다. 네트워크 연결 상태를 확인한 뒤 다시 열어주세요.");
+        return;
+      }
+
+      loadImageMap(ASSET_PATHS)
+        .then(bootGame)
+        .catch((error) => {
+          showError(error.message || "필수 이미지를 불러오지 못했습니다.");
+        });
+    })();
+  </script>
+</body>
+</html>
